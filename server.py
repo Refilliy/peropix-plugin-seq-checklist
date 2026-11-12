@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import sqlite3
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, StrictBool
 from plugins import host
 import recordsdb
@@ -17,6 +17,29 @@ from .identity import identify
 
 router = APIRouter()
 DATABASE = Path(__file__).resolve().parent / "_data" / "checklist.sqlite3"
+# Temporary across workspaces for this running PeroPix backend.
+checklist_enabled = True
+
+
+class Mode(BaseModel):
+    enabled: StrictBool
+
+
+@router.get("/api/mode")
+def mode():
+    return {"enabled": checklist_enabled}
+
+
+@router.post("/api/mode")
+def set_mode(body: Mode):
+    global checklist_enabled
+    checklist_enabled = body.enabled
+    return {"enabled": body.enabled}
+
+
+def require_enabled():
+    if not checklist_enabled:
+        raise HTTPException(409, "체크리스트가 OFF입니다. ON으로 전환한 뒤 다시 시도해 주세요.")
 
 
 class Scope(BaseModel):
@@ -77,6 +100,23 @@ def read_marks(workspace, group):
                             (workspace, group)).fetchall()
 
 
+def active_marks(workspace, marks):
+    # Keep the stored key through trash/undo. File existence can change without an index rewrite.
+    if not any(take for _, _, take in marks):
+        return marks
+    store = host.tools.store
+    _, keyed_files = workspace_index(store, workspace)
+    active = []
+    for person, scene, take in marks:
+        if take:
+            file = take.removeprefix("file:") if take.startswith("file:") else keyed_files.get(take.removeprefix("key:"))
+            path = store.file_path(workspace, file) if file else None
+            if not path or not path.is_file():
+                continue
+        active.append((person, scene, take))
+    return active
+
+
 def context(workspace, tab, group):
     spec = host.tools.store.load(workspace) or {}
     tabs = spec.get("tabs", [])
@@ -125,13 +165,19 @@ def manual_sort(workspace, group):
 
 @router.get("/api/selection")
 def selection(workspace: str, group: str, model: str = ""):
+    if not checklist_enabled:
+        return {"enabled": False}
+    return {"enabled": True, **saved_selection(workspace, group, model)}
+
+
+def saved_selection(workspace, group, model=""):
     fixed = companion_ids(workspace, group)
     limit = nai.caps(model)["max_characters"] if nai.uses_v4_prompt(model) else 0
-    return {"checked": [(p, s) for p, s, _ in read_marks(workspace, group)],
+    return {"checked": [(p, s) for p, s, _ in active_marks(workspace, read_marks(workspace, group))],
             "companions": fixed, "characterLimit": limit}
 
 
-@router.post("/api/companion")
+@router.post("/api/companion", dependencies=[Depends(require_enabled)])
 def companion(body: Companion):
     active, _, _ = context(body.workspace, body.tab, body.group)
     enabled = {c["id"] for c in people(active, enabled=True)}
@@ -160,19 +206,25 @@ def board(workspace: str, tab: str, group: str):
             "allCharacters": [{"id": c["id"], "name": c.get("name") or "", "group": c.get("group")} for c in people(active)],
             "groups": labels((active.get("prompt") or {}).get("charGroups") or []),
             "scenes": labels(cells(lane, unlocked=True)),
-            **selection(workspace, group)}
+            "autoPick": True, "enabled": checklist_enabled, **saved_selection(workspace, group)}
 
 
-@router.post("/api/marks")
+@router.post("/api/marks", dependencies=[Depends(require_enabled)])
 def mark(body: Marks):
     active, lane, _ = context(body.workspace, body.tab, body.group)
     chars, scenes = {c["id"] for c in people(active)}, {s["id"] for s in cells(lane)}
     with write_marks() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT person,scene,take FROM marks WHERE workspace=? AND group_id=?",
+                                (body.workspace, body.group)).fetchall()
+        dormant = {(p, s) for p, s, _ in set(existing) - set(active_marks(body.workspace, existing))}
         for change in body.changes:
             if change.character not in chars or change.scene not in scenes:
                 raise HTTPException(409, "인물이나 씬이 바뀌었습니다. 표를 새로고침해 주세요.")
             key = (body.workspace, body.group, change.character, change.scene)
             if change.checked:
+                if (change.character, change.scene) in dormant:
+                    conn.execute("UPDATE marks SET take=NULL WHERE workspace=? AND group_id=? AND person=? AND scene=?", key)
                 conn.execute("INSERT OR IGNORE INTO marks(workspace,group_id,person,scene) VALUES(?,?,?,?)", key)
             else:
                 conn.execute("DELETE FROM marks WHERE workspace=? AND group_id=? AND person=? AND scene=?", key)
@@ -182,16 +234,21 @@ def mark(body: Marks):
 @lru_cache(maxsize=3)
 def record_index(store, workspace, revision):
     # One index scan per file revision, even when several visible scenes request their order.
-    return {r["file"]: (n, r) for n, r in enumerate(store.records(workspace)) if r.get("file")}
+    files = {r["file"]: (n, r) for n, r in enumerate(store.records(workspace)) if r.get("file")}
+    return files, {r["key"]: file for file, (_, r) in files.items() if r.get("key")}
+
+
+def workspace_index(store, workspace):
+    try:
+        stat = (store.dir_of(workspace) / RECORDS_NAME).stat()
+    except FileNotFoundError:
+        return {}, {}
+    return record_index(store, workspace, (stat.st_mtime_ns, stat.st_size))
 
 
 def scene_records(workspace, lane, groups, files=None, scene=None):
     store = host.tools.store
-    try:
-        stat = (store.dir_of(workspace) / RECORDS_NAME).stat()
-    except FileNotFoundError:
-        return []
-    index = record_index(store, workspace, (stat.st_mtime_ns, stat.st_size))
+    index, _ = workspace_index(store, workspace)
     scenes = cells(lane)
     scene_ids = {s["id"] for s in scenes}
     names = Counter(s.get("name") for s in scenes)
@@ -224,7 +281,7 @@ def take_key(row):
     return "key:" + row["key"] if row["key"] else "file:" + row["file"]
 
 
-def characterize(workspace, rows, characters, first_slot):
+def characterize(workspace, rows, characters, first_slot, trust_stamp=False):
     # Read just the prompt snapshot fields from the record DB; other fields can contain images.
     database = host.tools.store.dir_of(workspace) / recordsdb.NAME
     by_key = {r["key"]: r for r in rows if r["key"]}
@@ -243,7 +300,8 @@ def characterize(workspace, rows, characters, first_slot):
                 for key, stamped, snapshot in conn.execute(sql, batch):
                     row = by_key[key]
                     if stamped:
-                        row["character"] = identify(row["path"], characters, stamped, first_slot=first_slot)
+                        row["character"] = (stamped if trust_stamp and stamped in current_ids else
+                                            identify(row["path"], characters, stamped, first_slot=first_slot))
                     elif isinstance(snapshot, str):
                         # The user may have edited a character's tags since an earlier round.
                         previous = json.loads(snapshot)
@@ -277,15 +335,15 @@ def ordered(rows, char_ids, picks):
     return leading + [r["file"] for r in rows if r["file"] not in used]
 
 
-def attribute_scene(workspace, lane, groups, rows, chars, marks):
-    first_slot = manual_sort(workspace, lane["id"]) or bool(companion_ids(workspace, lane["id"]))
-    characterize(workspace, rows, chars, first_slot)
+def attribute_scene(workspace, lane, groups, rows, chars, marks, *, for_auto_pick=False):
+    first_slot = for_auto_pick or manual_sort(workspace, lane["id"]) or bool(companion_ids(workspace, lane["id"]))
+    characterize(workspace, rows, chars, first_slot, for_auto_pick)
     by_file = {row["file"]: row for row in rows}
     frontier = {r["source"] for r in rows if r["source"] and not r["character"]}
     seen = set()
     while frontier:
         sources = scene_records(workspace, lane, groups, files=frontier - by_file.keys())
-        characterize(workspace, sources, chars, first_slot)
+        characterize(workspace, sources, chars, first_slot, for_auto_pick)
         by_file.update((r["file"], r) for r in sources)
         seen.update(frontier)
         frontier = {by_file[f]["source"] for f in frontier if f in by_file and by_file[f]["source"]} - seen
@@ -299,7 +357,7 @@ def attribute_scene(workspace, lane, groups, rows, chars, marks):
             row["character"] = pinned_keys.get((source["scene"], take_key(source))) or source["character"]
 
 
-@router.post("/api/resort")
+@router.post("/api/resort", dependencies=[Depends(require_enabled)])
 def resort(body: Scope):
     context(body.workspace, body.tab, body.group)
     with write_marks() as conn:
@@ -309,6 +367,8 @@ def resort(body: Scope):
 
 @router.post("/api/order")
 def order(body: Order):
+    if not checklist_enabled:
+        return {"enabled": False, "sceneOrders": {}}
     active, lane, groups = context(body.workspace, body.tab, body.group)
     if not (active.get("prompt") or {}).get("seqChars") and not manual_sort(body.workspace, body.group):
         return {"enabled": False, "sceneOrders": {}}
@@ -335,7 +395,51 @@ def takes(workspace: str, tab: str, group: str, scene: str):
             "picks": pinned(rows, read_marks(workspace, group), scene)}
 
 
-@router.post("/api/pick")
+@router.post("/api/auto-pick", dependencies=[Depends(require_enabled)])
+def auto_pick(body: Scope):
+    tab, group, groups = context(body.workspace, body.tab, body.group)
+    scope = (body.workspace, body.group)
+    chars = people(tab)
+    scenes = {c["id"] for c in cells(group, unlocked=True)}
+    rows = [r for r in scene_records(body.workspace, group, groups) if r["scene"] in scenes]
+    marks = read_marks(*scope)
+    attribute_scene(body.workspace, group, groups, rows, chars, marks, for_auto_pick=True)
+    per_scene = defaultdict(list)
+    for row in rows:
+        per_scene[row["scene"]].append(row)
+    count = inferred = 0
+    with write_marks() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT person,scene,take FROM marks WHERE workspace=? AND group_id=?", scope).fetchall()
+        if set(current) != set(marks):
+            raise HTTPException(409, "대표 선택이 바뀌었습니다. 다시 눌러 주세요.")
+        fixed = {p for (p,) in conn.execute("SELECT person FROM companions WHERE workspace=? AND group_id=?", scope)}
+        people_ids = {c["id"] for c in people(tab, enabled=True)} - fixed
+        checked = {(p, s) for p, s, _ in active_marks(body.workspace, current)}
+        for scene, images in per_scene.items():
+            picks = pinned(images, current, scene)
+            reserved = set(picks.values())
+            available = [r for r in images if r["file"] not in reserved]
+            missing = people_ids - picks.keys()
+            # Images are oldest first, so the most recent match wins.
+            choices = {r["character"]: r for r in available if r["character"] in missing}
+            remaining = missing - choices.keys()
+            unchecked = {p for p in remaining if (p, scene) not in checked}
+            last = remaining if len(remaining) == 1 else unchecked
+            if len(last) == 1:
+                unknown = next((r for r in reversed(available) if not r["character"]), None)
+                if unknown:
+                    choices[next(iter(last))] = unknown
+                    inferred += 1
+            for person, row in choices.items():
+                conn.execute("""INSERT INTO marks(workspace,group_id,person,scene,take) VALUES(?,?,?,?,?)
+                    ON CONFLICT(workspace,group_id,person,scene) DO UPDATE SET take=excluded.take""",
+                             (*scope, person, scene, take_key(row)))
+            count += len(choices)
+    return {"ok": True, "assigned": count, "inferred": inferred}
+
+
+@router.post("/api/pick", dependencies=[Depends(require_enabled)])
 def pick(body: Pick):
     active, lane, groups = context(body.workspace, body.tab, body.group)
     if body.character not in {p["id"] for p in people(active)} or body.scene not in {s["id"] for s in cells(lane)}:

@@ -44,6 +44,8 @@ p { margin: 0; }
 #companionChoices fieldset { margin:4px 0; padding:3px 7px; border:1px solid var(--line-soft); }
 #companionChoices label { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
 #resort { align-self:flex-start; }
+#mode { align-self:flex-start; font-weight:600; }
+#mode[aria-pressed="false"] { color:var(--ink-soft); border-style:dashed; }
 .mini main { box-sizing: border-box; padding: 8px; gap: 5px; height: 100vh; overflow: auto; }
 .mini .top { align-items: center; }
 .mini h1 { display: none; }

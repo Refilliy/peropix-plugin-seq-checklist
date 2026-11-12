@@ -5,7 +5,7 @@ const mini = new URLSearchParams(location.search).get("view") === "mini";
 const detached = new URLSearchParams(location.search).get("window") === "detached";
 const restartNotice = "실행 중인 PeroPix 백엔드에 동반 선택 저장 기능이 없습니다. 작업을 저장하고 PeroPix를 완전히 종료한 뒤 다시 열어 주세요.";
 document.documentElement.classList.toggle("mini", mini);
-let visible = !mini;
+let visible = !mini || detached;
 const head = byId("head");
 const rows = byId("rows");
 const matrix = byId("matrix");
@@ -61,6 +61,7 @@ function clearBoard(message) {
   head.replaceChildren();
   rows.replaceChildren();
   byId("companions").hidden = true;
+  byId("mode").hidden = true;
   byId("resort").hidden = true;
   for (const id of ["summary", "matrix", "actions"]) byId(id).hidden = true;
   byId("scope").textContent = activeScope?.workspace || "";
@@ -132,18 +133,22 @@ function buildMatrix(data) {
 }
 
 function paintMarks() {
+  const locked = saving || board?.enabled === false;
   let marked = 0;
   for (const [key, input] of checkboxes) {
     input.checked = checked.has(key);
-    input.disabled = saving;
+    input.disabled = locked;
     if (input.checked) marked++;
   }
   remaining.textContent = "한 바퀴에 남은 조합 " + (checkboxes.size - marked) + "개";
   excluded.textContent = "건너뜀 " + marked + " / 전체 " + checkboxes.size;
-  markAll.disabled = saving || marked === checkboxes.size;
-  clearAll.disabled = saving || marked === 0;
-  byId("resort").disabled = saving;
-  for (const input of byId("companionChoices").querySelectorAll("input")) input.disabled = saving;
+  markAll.disabled = locked || marked === checkboxes.size;
+  clearAll.disabled = locked || marked === 0;
+  byId("resort").disabled = locked;
+  byId("mode").disabled = saving;
+  byId("autoPick").disabled = locked;
+  for (const input of byId("companionChoices").querySelectorAll("input")) input.disabled = locked;
+  for (const button of rows.querySelectorAll("button")) button.disabled = locked;
 }
 
 function buildCompanions(data) {
@@ -184,6 +189,7 @@ function buildCompanions(data) {
 
 function render(data) {
   board = data;
+  if (data.enabled === false && picking) closePicker();
   const scopeLabel = [activeScope.workspace, data.tabName || data.tab, data.groupName || data.group].filter(Boolean);
   byId("scope").textContent = scopeLabel.join(" › ");
   const nextStructure = JSON.stringify([data.characters, data.scenes, data.allCharacters, data.groups, data.companions]);
@@ -197,8 +203,15 @@ function render(data) {
   paintMarks();
   const empty = !checkboxes.size;
   byId("resort").hidden = !Array.isArray(data.companions);
+  const mode = byId("mode");
+  mode.hidden = typeof data.enabled !== "boolean";
+  mode.textContent = "체크리스트 " + (data.enabled ? "ON" : "OFF");
+  mode.setAttribute("aria-pressed", String(!!data.enabled));
+  byId("autoPick").hidden = !data.autoPick || empty;
   for (const id of ["summary", "matrix", "actions"]) byId(id).hidden = empty;
-  if (!Array.isArray(data.companions)) showNotice(restartNotice);
+  byId("summary").hidden = empty || data.enabled === false;
+  if (data.enabled === false) showNotice("후편집 모드입니다. 모든 탭에서 기본 생성 요청과 이미지 순서를 사용합니다. 버튼을 다시 누르면 기존 체크와 동반 설정을 적용합니다.");
+  else if (!Array.isArray(data.companions)) showNotice(restartNotice);
   else if (!data.characters.length) showNotice("탭에서 생성할 캐릭터를 켜면 여기에 표시됩니다.");
   else if (!data.scenes.length) showNotice("씬 그룹에 잠금이 풀린 씬이 생기면 여기에 표시됩니다.");
   else if (!data.seqChars) showNotice("이 탭에서 캐릭터 순차 생성을 켜면 체크한 조합을 건너뜁니다.");
@@ -266,7 +279,7 @@ async function save(changes, companion = null) {
     });
     if (companion) {
       structure = "";
-      if (companion.enabled && !board.seqChars) {
+      if (companion.enabled && !board.seqChars && board.enabled !== false) {
         const result = await peropix.action("set_seq_chars", {on:true, workspace:scope.workspace, tab:scope.tab, sceneGroup:scope.group});
         if (!result?.ok) throw Error("동반 선택은 저장했습니다. 탭에서 캐릭터 순차 생성을 켜 주세요.");
       }
@@ -416,6 +429,43 @@ byId("usePick").addEventListener("click", () => {
 });
 markAll.addEventListener("click", () => markVisible(true));
 clearAll.addEventListener("click", () => markVisible(false));
+byId("mode").addEventListener("click", async () => {
+  if (!board || saving) return;
+  saving = true;
+  revision++;
+  paintMarks();
+  try {
+    const {enabled} = await request("../api/mode", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({enabled:!board.enabled})});
+    render({...board, enabled});
+    window.parent.postMessage({type:"seq-checklist:mode-changed"}, "*");
+  } catch (error) { status(error.message, true); }
+  finally {
+    saving = false;
+    paintMarks();
+    lastRead = 0;
+  }
+});
+byId("autoPick").addEventListener("click", async () => {
+  if (!activeScope || saving) return;
+  saving = true;
+  revision++;
+  paintMarks();
+  status("씬별로 대표 이미지를 찾는 중…");
+  try {
+    const result = await request("../api/auto-pick", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(activeScope)});
+    notifySceneOrder();
+    status(result.assigned ? "대표 " + result.assigned + "장을 지정했습니다." +
+      (result.inferred ? " 남은 인물로 배정한 이미지 " + result.inferred + "장." : "") : "새로 지정할 대표 이미지가 없습니다.");
+  } catch (error) { status(error.message, true); statusLine.dataset.saveError = "true"; }
+  finally {
+    saving = false;
+    paintMarks();
+    lastRead = 0;
+    refresh();
+  }
+});
 byId("resort").addEventListener("click", async () => {
   if (!activeScope || saving) return;
   try {
@@ -434,9 +484,12 @@ byId("detach").onclick = () => {
   window.parent.postMessage({type:"seq-checklist:detach"}, "*");
 };
 document.addEventListener("visibilitychange", () => refresh(true));
+window.addEventListener("message", event => {
+  if (event.source === window.parent && event.data?.type === "seq-checklist:reload-mode") refresh(true);
+});
 window.addEventListener("focus", () => refresh(true));
 setInterval(() => refresh(), 1500);
-if (mini) {
+if (mini && !detached) {
   new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
     if (visible) refresh(true);

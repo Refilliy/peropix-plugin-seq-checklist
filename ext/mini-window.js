@@ -127,6 +127,10 @@
           child.addEventListener("message", async event => {
             if (event.origin !== origin || event.source !== content.contentWindow) return;
             const msg = event.data;
+            if (msg?.type === "seq-checklist:mode-changed") {
+              window.dispatchEvent(new Event("seq-checklist:detached-mode"));
+              return;
+            }
             if (msg?.type === "seq-checklist:refresh") {
               window.dispatchEvent(new Event("seq-checklist:detached-refresh"));
               return;
@@ -191,6 +195,9 @@
       }
       window.addEventListener("pagehide", () => {
         if (popup && !popup.closed) popup.close();
+      });
+      window.addEventListener("seq-checklist:reload-mode", () => {
+        if (popup && !popup.closed) popup.document.querySelector("iframe")?.contentWindow?.postMessage({type:"seq-checklist:reload-mode"}, origin);
       });
       window.addEventListener("message", event => {
         if (event.origin !== origin || event.data?.type !== "seq-checklist:detach") return;

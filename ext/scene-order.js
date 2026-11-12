@@ -18,6 +18,42 @@
       let nativeComparator;
       let active;
       let repaintPending = false;
+      let modeEnabled, removeModeButton, modeRequest = 0, switching = false;
+
+      async function syncMode(change = false) {
+        if (change && switching) return;
+        const revision = ++modeRequest;
+        if (change) switching = true;
+        try {
+          const options = change && typeof modeEnabled === "boolean"
+            ? {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled:!modeEnabled})}
+            : {cache:"no-store"};
+          const response = await originalFetch(base + "/plug/seq-checklist/api/mode", options);
+          if (!response.ok) throw Error();
+          const {enabled} = await response.json();
+          if (typeof enabled !== "boolean") throw Error();
+          if (revision !== modeRequest) {
+            if (change) await syncMode();
+            return;
+          }
+          if (modeEnabled !== enabled) {
+            modeEnabled = enabled;
+            removeModeButton?.();
+            removeModeButton = api.addButton("generate.footer", {
+              label:"체크리스트 " + (enabled ? "ON" : "OFF"), onClick:() => syncMode(true)
+            });
+            if (active) invalidate(active);
+            for (const frame of document.querySelectorAll('iframe[data-plugin-canvas="seq-checklist"]'))
+              frame.contentWindow?.postMessage?.({type:"seq-checklist:reload-mode"}, backendOrigin);
+            window.dispatchEvent(new Event("seq-checklist:reload-mode"));
+          }
+          if (change) api.toast(enabled ? "체크리스트 ON · 기존 설정을 적용합니다." : "체크리스트 OFF · 기본 생성과 정렬을 사용합니다.");
+        } catch {
+          if (change) api.toast("적용 상태를 확인할 수 없습니다. PeroPix를 다시 실행해 주세요.", "warn");
+        } finally {
+          if (change) switching = false;
+        }
+      }
 
       function scope() {
         const { workspace, tab, sceneGroup: group } = api.state();
@@ -138,11 +174,14 @@
       };
 
       window.addEventListener("message", event => {
-        if (event.origin !== backendOrigin || event.data?.type !== "seq-checklist:refresh") return;
+        if (event.origin !== backendOrigin || !["seq-checklist:refresh","seq-checklist:mode-changed"].includes(event.data?.type)) return;
         const frames = document.querySelectorAll('iframe[data-plugin-canvas="seq-checklist"]');
-        if (Array.from(frames).some(frame => event.source === frame.contentWindow)) invalidate(scope());
+        if (!Array.from(frames).some(frame => event.source === frame.contentWindow)) return;
+        if (event.data.type === "seq-checklist:mode-changed") syncMode();
+        else invalidate(scope());
       });
       window.addEventListener("seq-checklist:detached-refresh", () => invalidate(scope()));
+      window.addEventListener("seq-checklist:detached-mode", () => syncMode());
 
       // Character order is saved in the normal workspace PUT. Refresh after
       // a successful save so the backend reads the new canonical order.
@@ -177,6 +216,7 @@
         return request;
       };
       api.addButton("generate.footer", {label:"인물별 정렬", async onClick() {
+        if (modeEnabled === false) return api.toast("체크리스트를 ON으로 전환한 뒤 정렬해 주세요.", "warn");
         const view = scope();
         if (!view) return api.toast("정렬할 씬 그룹을 먼저 열어 주세요.", "warn");
         try {
@@ -189,6 +229,8 @@
           api.toast("현재 씬 그룹에 인물별 정렬을 요청했습니다.");
         } catch (error) { api.toast(error.message, "warn"); }
       }});
+      removeModeButton = api.addButton("generate.footer", {label:"체크리스트 ON/OFF", onClick:() => syncMode(true)});
+      syncMode();
       window[installed] = true;
       // The first native scene render may predate async extension loading.
       refreshRows();

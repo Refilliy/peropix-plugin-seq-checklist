@@ -141,19 +141,18 @@
 
         const workspace = payload.base?.workspace;
         const group = payload.base?.scene_group_id;
-        if (!validId(workspace) || !validId(group)) {
-          stop("워크스페이스 또는 씬 그룹을 확인할 수 없어 순차생성을 중단했습니다.");
-        }
         const lookup = new URL(selection);
-        lookup.searchParams.set("workspace", workspace);
-        lookup.searchParams.set("group", group);
-        lookup.searchParams.set("model", payload.base.model || "");
+        lookup.searchParams.set("workspace", workspace || "");
+        lookup.searchParams.set("group", group || "");
+        lookup.searchParams.set("model", payload.base?.model || "");
         const signal = init?.signal ?? input?.signal;
         let checked, fixed, limit;
         try {
           const response = await previousFetch(lookup.href, { method: "GET", cache: "no-store", signal });
           if (!response.ok) throw new Error();
           const settings = await response.json();
+          if (settings.enabled === false) return previousFetch(input, init);
+          if (!validId(workspace) || !validId(group)) throw Error();
           checked = selections(settings);
           if (!Array.isArray(settings.companions) || !settings.companions.every(validId)) throw new Error();
           fixed = new Set(settings.companions);
