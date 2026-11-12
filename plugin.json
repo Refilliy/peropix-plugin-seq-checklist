@@ -1,7 +1,7 @@
 {
   "id": "seq-checklist",
   "name": "생성 체크리스트",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "순차 다중 생성에서 건너뛸 조합을 체크하고 씬 결과를 캐릭터 순서로 정리합니다.",
   "server": "server.py",
   "web": "web",

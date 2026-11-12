@@ -99,7 +99,16 @@ function buildMatrix(data) {
     if (data.companions?.includes(character.id)) continue;
     const row = document.createElement("tr");
     const name = character.name || ("캐릭터 " + (index + 1));
-    row.append(makeHeading(name, "row"));
+    const heading = makeHeading("", "row");
+    const label = document.createElement("label");
+    label.title = name + "의 모든 씬 체크 또는 해제";
+    const rowToggle = document.createElement("input");
+    rowToggle.type = "checkbox";
+    rowToggle.setAttribute("aria-label", label.title);
+    rowToggle.addEventListener("change", () => markVisible(rowToggle.checked, character.id));
+    label.append(rowToggle, document.createTextNode(name));
+    heading.append(label);
+    row.append(heading);
     for (const [sceneIndex, scene] of data.scenes.entries()) {
       const key = pairKey(character.id, scene.id);
       const cell = row.insertCell();
@@ -135,10 +144,19 @@ function buildMatrix(data) {
 function paintMarks() {
   const locked = saving || board?.enabled === false;
   let marked = 0;
-  for (const [key, input] of checkboxes) {
-    input.checked = checked.has(key);
-    input.disabled = locked;
-    if (input.checked) marked++;
+  for (const row of rows.rows) {
+    const rowToggle = row.querySelector("th input");
+    const cells = row.querySelectorAll("td input[data-pair]");
+    let rowCount = 0;
+    for (const input of cells) {
+      input.checked = checked.has(input.dataset.pair);
+      input.disabled = locked;
+      if (input.checked) rowCount++;
+    }
+    rowToggle.checked = cells.length > 0 && rowCount === cells.length;
+    rowToggle.indeterminate = rowCount > 0 && rowCount < cells.length;
+    rowToggle.disabled = locked || !cells.length;
+    marked += rowCount;
   }
   remaining.textContent = "한 바퀴에 남은 조합 " + (checkboxes.size - marked) + "개";
   excluded.textContent = "건너뜀 " + marked + " / 전체 " + checkboxes.size;
@@ -298,10 +316,11 @@ async function save(changes, companion = null) {
   }
 }
 
-function markVisible(value) {
-  if (!board || saving) return;
+function markVisible(value, characterId = null) {
+  if (!board || saving || board.enabled === false) return;
   const changes = [];
   for (const character of board.characters) {
+    if (characterId !== null && character.id !== characterId) continue;
     if (board.companions?.includes(character.id)) continue;
     for (const scene of board.scenes) {
       if (checked.has(pairKey(character.id, scene.id)) !== value) {

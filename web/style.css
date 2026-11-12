@@ -23,6 +23,8 @@ p { margin: 0; }
 #matrix th, #matrix td { text-align: center; border: 0; border-bottom: 1px solid var(--line-soft); border-inline-end: 1px solid var(--line-soft); }
 #matrix th { padding: 7px 10px; font-weight: var(--w-semi); max-width: 13rem; overflow-wrap: anywhere; }
 #matrix th[scope="row"] { text-align: start; background: var(--panel); }
+#matrix th[scope="row"] label { display:flex; align-items:center; gap:6px; margin:0; cursor:pointer; }
+#matrix th[scope="row"] input { flex-shrink:0; }
 #matrix thead th { position: sticky; top: 0; z-index: 2; background: var(--code-bg); min-width: 5rem; }
 #matrix tr > th:first-child { position: sticky; left: 0; z-index: 1; min-width: 6rem; }
 #matrix thead tr > th:first-child { z-index: 3; text-align: start; }
