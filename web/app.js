@@ -162,7 +162,7 @@ function paintMarks() {
   excluded.textContent = "건너뜀 " + marked + " / 전체 " + checkboxes.size;
   markAll.disabled = locked || marked === checkboxes.size;
   clearAll.disabled = locked || marked === 0;
-  byId("resort").disabled = locked;
+  byId("resort").disabled = saving;
   byId("mode").disabled = saving;
   byId("autoPick").disabled = locked;
   for (const input of byId("companionChoices").querySelectorAll("input")) input.disabled = locked;
@@ -228,7 +228,7 @@ function render(data) {
   byId("autoPick").hidden = !data.autoPick || empty;
   for (const id of ["summary", "matrix", "actions"]) byId(id).hidden = empty;
   byId("summary").hidden = empty || data.enabled === false;
-  if (data.enabled === false) showNotice("후편집 모드입니다. 모든 탭에서 기본 생성 요청과 이미지 순서를 사용합니다. 버튼을 다시 누르면 기존 체크와 동반 설정을 적용합니다.");
+  if (data.enabled === false) showNotice("후편집 모드입니다. 모든 탭에서 기본 생성 요청을 사용하며 기존 인물별 정렬은 유지합니다. 버튼을 다시 누르면 기존 체크와 동반 설정을 적용합니다.");
   else if (!Array.isArray(data.companions)) showNotice(restartNotice);
   else if (!data.characters.length) showNotice("탭에서 생성할 캐릭터를 켜면 여기에 표시됩니다.");
   else if (!data.scenes.length) showNotice("씬 그룹에 잠금이 풀린 씬이 생기면 여기에 표시됩니다.");

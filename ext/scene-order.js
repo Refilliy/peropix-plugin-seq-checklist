@@ -47,7 +47,7 @@
               frame.contentWindow?.postMessage?.({type:"seq-checklist:reload-mode"}, backendOrigin);
             window.dispatchEvent(new Event("seq-checklist:reload-mode"));
           }
-          if (change) api.toast(enabled ? "체크리스트 ON · 기존 설정을 적용합니다." : "체크리스트 OFF · 기본 생성과 정렬을 사용합니다.");
+          if (change) api.toast(enabled ? "체크리스트 ON · 기존 설정을 적용합니다." : "체크리스트 OFF · 기본 생성 요청을 사용하며 인물별 정렬은 유지합니다.");
         } catch {
           if (change) api.toast("적용 상태를 확인할 수 없습니다. PeroPix를 다시 실행해 주세요.", "warn");
         } finally {
@@ -216,7 +216,6 @@
         return request;
       };
       api.addButton("generate.footer", {label:"인물별 정렬", async onClick() {
-        if (modeEnabled === false) return api.toast("체크리스트를 ON으로 전환한 뒤 정렬해 주세요.", "warn");
         const view = scope();
         if (!view) return api.toast("정렬할 씬 그룹을 먼저 열어 주세요.", "warn");
         try {

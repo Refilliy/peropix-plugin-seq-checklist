@@ -357,7 +357,7 @@ def attribute_scene(workspace, lane, groups, rows, chars, marks, *, for_auto_pic
             row["character"] = pinned_keys.get((source["scene"], take_key(source))) or source["character"]
 
 
-@router.post("/api/resort", dependencies=[Depends(require_enabled)])
+@router.post("/api/resort")
 def resort(body: Scope):
     context(body.workspace, body.tab, body.group)
     with write_marks() as conn:
@@ -367,8 +367,6 @@ def resort(body: Scope):
 
 @router.post("/api/order")
 def order(body: Order):
-    if not checklist_enabled:
-        return {"enabled": False, "sceneOrders": {}}
     active, lane, groups = context(body.workspace, body.tab, body.group)
     if not (active.get("prompt") or {}).get("seqChars") and not manual_sort(body.workspace, body.group):
         return {"enabled": False, "sceneOrders": {}}
